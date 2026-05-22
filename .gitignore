@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Vite build output
+dist/
+
+# Environment variables
+.env.local
+.env.production
+
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/*.pyc
+backend/loto.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+#Claude Code instructions
+LOTTERY_APP_CLAUDE_CODE.md
