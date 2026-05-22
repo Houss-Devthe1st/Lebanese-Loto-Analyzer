@@ -1,10 +1,14 @@
 import re
+import time
+import logging
 import httpx
 from bs4 import BeautifulSoup
 from datetime import datetime
 from db import get_conn
 
-LLDJ_URL = "https://www.lldj.com/en/LatestResults/Loto"
+logger = logging.getLogger(__name__)
+
+BASE_URL = "https://www.lebanon-lotto.com/lebanese-loto-results/draw-number/{}.php"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -13,91 +17,111 @@ HEADERS = {
     )
 }
 
+# Matches _04.gif, _30.gif etc. at end of image filename
+_NUMBER_RE = re.compile(r'_(\d{1,2})\.gif', re.IGNORECASE)
+# Known recent draw to start probing from
+_PROBE_START = 2416
 
-def fetch_html() -> str:
+
+def _get(draw_number: int) -> str | None:
+    """Fetch one draw page. Returns None on 404, raises on other errors."""
+    url = BASE_URL.format(draw_number)
     try:
-        resp = httpx.get(LLDJ_URL, headers=HEADERS, timeout=15, follow_redirects=True)
-    except httpx.ConnectError:
-        # Retry once with SSL verification disabled (handles corporate proxy / cert issues)
-        resp = httpx.get(LLDJ_URL, headers=HEADERS, timeout=15, follow_redirects=True, verify=False)
-    if resp.status_code == 403:
-        raise RuntimeError(
-            "LLDJ returned 403 Forbidden — the site may be blocking automated requests. "
-            "Try again later or upload draw data manually as CSV."
-        )
+        resp = httpx.get(url, headers=HEADERS, timeout=15, follow_redirects=True)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Network error fetching draw {draw_number}: {exc}") from exc
+    if resp.status_code == 404:
+        return None
     resp.raise_for_status()
     return resp.text
 
 
-def _to_iso(date_str: str) -> str:
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+def _parse_date(soup: BeautifulSoup) -> str | None:
+    text = soup.get_text(" ", strip=True)
+    # ISO format: 2026-05-21
+    m = re.search(r'\b(\d{4}-\d{2}-\d{2})\b', text)
+    if m:
+        return m.group(1)
+    # Ordinal format: "21st May 2026", "18th May 2026"
+    m = re.search(r'(\d{1,2})(?:st|nd|rd|th)\s+(\w+)\s+(\d{4})', text, re.IGNORECASE)
+    if m:
         try:
-            return datetime.strptime(date_str.strip(), fmt).strftime("%Y-%m-%d")
+            return datetime.strptime(
+                f"{m.group(1)} {m.group(2)} {m.group(3)}", "%d %B %Y"
+            ).strftime("%Y-%m-%d")
         except ValueError:
             pass
-    return date_str.strip()
-
-
-def _parse_lbp_amount(text: str) -> int | None:
-    """Extract a numeric LBP amount from text like '1,250,000,000 L.L.' or '1.25 Billion'."""
-    cleaned = text.replace(",", "").replace(".", "").replace("\xa0", "").strip()
-    # Match a plain integer (possibly with whitespace/currency suffix)
-    m = re.search(r"(\d{6,})", cleaned)
-    if m:
-        return int(m.group(1))
-    # Handle 'X.XX Billion' / 'X.XX Million' style
-    m = re.search(r"([\d.]+)\s*[Bb]illion", text)
-    if m:
-        return int(float(m.group(1)) * 1_000_000_000)
-    m = re.search(r"([\d.]+)\s*[Mm]illion", text)
-    if m:
-        return int(float(m.group(1)) * 1_000_000)
     return None
 
 
-def parse_draws(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
+def _parse_numbers(soup: BeautifulSoup) -> tuple[list[int], int | None]:
+    """
+    Returns (sorted_main_6, additional_or_None).
+    Lotto balls live in images/lotto_balls* directories.
+    Zeed balls live in images/zeed_numbers — excluded.
+    """
+    imgs = [
+        img for img in soup.find_all("img")
+        if "lotto_balls" in str(img.get("src", "")).lower()
+        and "zeed" not in str(img.get("src", "")).lower()
+    ]
+    numbers = []
+    for img in imgs:
+        m = _NUMBER_RE.search(str(img.get("src", "")))
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= 42:
+                numbers.append(n)
 
-    for row in soup.find_all("tr"):
-        cells = row.find_all("td")
-        if len(cells) < 8:
-            continue
-        texts = [c.get_text(strip=True) for c in cells]
+    if len(numbers) < 6:
+        return [], None
+
+    main = sorted(numbers[:6])
+    additional = numbers[6] if len(numbers) >= 7 else None
+    return main, additional
+
+
+def _parse_jackpot(soup: BeautifulSoup) -> int | None:
+    """Return jackpot prize in LBP if there was at least one winner, else None."""
+    text = soup.get_text(" ", strip=True)
+    m = re.search(
+        r'jackpot.*?(\d[\d,]+)\s*(?:L\.?L\.?|LBP|Lebanese)',
+        text, re.IGNORECASE | re.DOTALL
+    )
+    if m:
         try:
-            draw_number = int(texts[0])
-            draw_date = _to_iso(texts[1])
-            numbers = [int(texts[i]) for i in range(2, 8)]
-            additional = int(texts[8]) if len(texts) > 8 else int(texts[7])
-            numbers_sorted = sorted(numbers[:6])
-
-            # Jackpot amount is typically in the cell after the additional number
-            jackpot_lbp = None
-            for cell_text in texts[8:]:
-                amount = _parse_lbp_amount(cell_text)
-                if amount and amount > 1_000_000:   # sanity: at least 1M LBP
-                    jackpot_lbp = amount
-                    break
-
-            results.append({
-                "draw_number": draw_number,
-                "draw_date": draw_date,
-                "n1": numbers_sorted[0],
-                "n2": numbers_sorted[1],
-                "n3": numbers_sorted[2],
-                "n4": numbers_sorted[3],
-                "n5": numbers_sorted[4],
-                "n6": numbers_sorted[5],
-                "additional": additional,
-                "jackpot_lbp": jackpot_lbp,
-            })
-        except (ValueError, IndexError):
-            continue
-
-    return results
+            amount = int(m.group(1).replace(",", ""))
+            if amount > 1_000_000:
+                return amount
+        except ValueError:
+            pass
+    return None
 
 
-def upsert_draws(draws: list[dict]):
+def _parse_draw(html: str, draw_number: int) -> dict | None:
+    soup = BeautifulSoup(html, "html.parser")
+
+    draw_date = _parse_date(soup)
+    if not draw_date:
+        logger.warning("Draw %d: could not parse date — skipping", draw_number)
+        return None
+
+    main, additional = _parse_numbers(soup)
+    if len(main) < 6:
+        logger.warning("Draw %d: only %d numbers found — skipping", draw_number, len(main))
+        return None
+
+    return {
+        "draw_number": draw_number,
+        "draw_date":   draw_date,
+        "n1": main[0], "n2": main[1], "n3": main[2],
+        "n4": main[3], "n5": main[4], "n6": main[5],
+        "additional":  additional,
+        "jackpot_lbp": _parse_jackpot(soup),
+    }
+
+
+def _upsert(draws: list[dict]) -> None:
     with get_conn() as conn:
         conn.executemany(
             """
@@ -111,14 +135,78 @@ def upsert_draws(draws: list[dict]):
         conn.commit()
 
 
-def run_scrape() -> int:
-    html = fetch_html()
-    draws = parse_draws(html)
+def _find_latest_draw() -> int:
+    """Walk upward from _PROBE_START until we hit a 404."""
+    probe = _PROBE_START
+    while True:
+        html = _get(probe + 1)
+        if html is None:
+            return probe
+        probe += 1
+
+
+def run_scrape(max_history: int = 500) -> int:
+    """
+    Fetch draws from lebanon-lotto.com and upsert into DB.
+
+    - Empty DB:        bulk fetch up to max_history draws backwards from latest.
+    - DB has data:     fetch new draws forward + backfill backwards if below max_history.
+    - Up to date:      no-op, returns 0.
+    Returns the number of draws upserted.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(draw_number), MIN(draw_number), COUNT(*) FROM draws"
+        ).fetchone()
+        latest_in_db   = row[0]  # None if empty
+        earliest_in_db = row[1]
+        count_in_db    = row[2]
+
+    latest_on_site = _find_latest_draw()
+    logger.info("Latest on site: %d | Latest in DB: %s | Count: %d",
+                latest_on_site, latest_in_db, count_in_db)
+
+    to_fetch: list[int] = []
+
+    if count_in_db == 0:
+        # First run — fetch backwards from latest up to max_history draws
+        to_fetch = list(range(latest_on_site, max(0, latest_on_site - max_history), -1))
+    else:
+        # Forward: any draws newer than what we have
+        if latest_on_site > latest_in_db:
+            to_fetch += list(range(latest_on_site, latest_in_db, -1))
+
+        # Backward: fill history if we're still under the cap
+        if count_in_db < max_history:
+            need = max_history - count_in_db
+            backfill_start = earliest_in_db - 1
+            to_fetch += list(range(backfill_start, max(0, backfill_start - need), -1))
+
+    if not to_fetch:
+        logger.info("DB already up to date.")
+        return 0
+
+    draws = []
+    for draw_num in to_fetch:
+        html = _get(draw_num)
+        if html is None:
+            logger.debug("Draw %d returned 404 — skipping", draw_num)
+            continue
+        draw = _parse_draw(html, draw_num)
+        if draw:
+            draws.append(draw)
+            logger.info("  ✓ Draw %d  %s", draw_num, draw["draw_date"])
+        time.sleep(0.3)  # polite rate limiting
+
     if draws:
-        upsert_draws(draws)
+        _upsert(draws)
+
+    logger.info("Scraped and upserted %d draw(s).", len(draws))
     return len(draws)
 
 
 if __name__ == "__main__":
+    import logging as _log
+    _log.basicConfig(level=logging.INFO)
     count = run_scrape()
-    print(f"Scraped and upserted {count} draws.")
+    print(f"Done — {count} draw(s) upserted.")

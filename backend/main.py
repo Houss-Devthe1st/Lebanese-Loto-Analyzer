@@ -16,6 +16,8 @@ logging.basicConfig(level=logging.INFO)
 async def lifespan(app: FastAPI):
     init_db()
     start_scheduler()
+    logging.info("Triggering background scrape on startup.")
+    asyncio.create_task(asyncio.to_thread(_scrape_job))
     yield
     shutdown_scheduler()
 

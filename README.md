@@ -2,61 +2,52 @@
 
 A statistical analysis web app for the Lebanese Loto. Browse historical draw results, visualize number frequency, and generate statistically-sampled combinations.
 
-**The app works without a backend** — sample data loads automatically on first launch.
+**The app works without a backend** — sample data loads automatically if the backend is unreachable.
 
 ---
 
 ## Quick Start
 
 ```powershell
-npm install
-npm run dev
+.\start.ps1
 ```
 
-Open **http://localhost:5173**. That's it.
+That's it. The script handles everything on first run:
+- Creates the Python virtual environment if missing
+- Installs Python and npm dependencies
+- Starts the backend and frontend together
+- Automatically scrapes the last 500 draws in the background
+
+Open **http://localhost:5173**. Data populates within a couple of minutes while you use the app.
+
+> **Subsequent launches** — same command. Dependencies are skipped if already installed.
 
 ---
 
-## Enabling Live Data
+## First-Time Setup Requirement
 
-The backend scrapes draw results from [lldj.com](https://www.lldj.com) and serves them over a local API. You need two terminals running at the same time.
+Python 3.11+ must be installed and available in your PATH. Everything else is handled by `start.ps1`.
 
-**Terminal 1 — start the API**
+---
 
-```powershell
-cd backend
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
+## How the Scraper Works
 
-**Terminal 2 — start the frontend**
+Draw results are fetched from [lebanon-lotto.com](https://www.lebanon-lotto.com) and stored in a local SQLite database.
 
-```powershell
-npm run dev
-```
+| Run | Behaviour |
+|---|---|
+| First launch (empty DB) | Fetches the last 500 draws going backwards from the latest |
+| Subsequent launches | Fetches only draws newer than what's already in the DB |
+| Below 500 draws in DB | Backfills backwards on every startup until the target is reached |
+| Scheduled | Runs automatically every **Monday and Thursday at 20:00 Beirut time** |
 
-The app detects the backend automatically and switches to live data. If it can't connect, it shows an amber warning banner and falls back to sample data.
-
-### Populate the database
-
-The database starts empty. Run the scraper once to pull in the latest draws:
-
-```powershell
-cd backend
-.venv\Scripts\Activate.ps1
-python scraper.py
-```
-
-After that, the scheduler keeps it up to date automatically — it runs every **Monday and Thursday at 20:00 Beirut time**, 30 minutes after each draw is broadcast.
-
-You can also trigger a sync at any time using the **Sync Now** button in the app header.
+You can also trigger a manual sync at any time using the **Sync Now** button in the app header.
 
 ### Check the API is running
 
 ```powershell
 curl http://localhost:8000/api/health
-# → {"status":"ok","draw_count":116}
+# → {"status":"ok","draw_count":500}
 ```
 
 ---
@@ -68,7 +59,7 @@ The app tries three sources in order:
 | Priority | Source | Condition |
 |:---:|---|---|
 | 1 | **Live API** — `localhost:8000` | Backend is running and the database has draws |
-| 2 | **Sample data** — `public/sample-data.csv` | Backend is unreachable (warning shown) |
+| 2 | **Sample data** — `public/sample-data.csv` | Backend is unreachable (amber warning shown) |
 | 3 | **Your CSV** | Uploaded manually via the header button or History page |
 
 ---

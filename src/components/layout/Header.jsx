@@ -154,26 +154,45 @@ export default function Header({ onMenuClick }) {
       </header>
 
       {/* API error banner */}
-      {apiError && (
-        <div className="flex items-start gap-3 px-4 md:px-6 py-2.5 bg-amber-950/60 border-b border-amber-800/40 text-amber-300 text-xs">
-          <AlertTriangle size={14} className="shrink-0 mt-0.5 text-amber-400" />
-          <div className="flex-1 min-w-0">
-            <span className="font-semibold text-amber-400">Backend unavailable — showing sample data. </span>
-            <span className="text-amber-300/80">{apiError}</span>
-            <span className="ml-2 text-amber-500">
-              Start the backend:{' '}
-              <code className="font-mono bg-amber-900/40 px-1 rounded">uvicorn main:app --reload</code>
-              {' '}then{' '}
-              <button onClick={loadFromApi} className="underline hover:text-amber-200 transition-colors">
-                retry
-              </button>.
-            </span>
+      {apiError && (() => {
+        const isEmptyDb = apiError.includes('no draws yet')
+        return (
+          <div className="flex items-start gap-3 px-4 md:px-6 py-2.5 bg-amber-950/60 border-b border-amber-800/40 text-amber-300 text-xs">
+            <AlertTriangle size={14} className="shrink-0 mt-0.5 text-amber-400" />
+            <div className="flex-1 min-w-0">
+              {isEmptyDb ? (
+                <>
+                  <span className="font-semibold text-amber-400">Database is empty — showing sample data. </span>
+                  <span className="text-amber-300/80">Run </span>
+                  <code className="font-mono bg-amber-900/40 px-1 rounded">python scraper.py</code>
+                  <span className="text-amber-300/80"> inside the </span>
+                  <code className="font-mono bg-amber-900/40 px-1 rounded">backend/</code>
+                  <span className="text-amber-300/80"> folder to populate it, then </span>
+                  <button onClick={loadFromApi} className="underline hover:text-amber-200 transition-colors">
+                    retry
+                  </button>.
+                </>
+              ) : (
+                <>
+                  <span className="font-semibold text-amber-400">Backend unavailable — showing sample data. </span>
+                  <span className="text-amber-300/80">{apiError} </span>
+                  <span className="text-amber-500">
+                    Start it with{' '}
+                    <code className="font-mono bg-amber-900/40 px-1 rounded">uvicorn main:app --reload</code>
+                    {' '}then{' '}
+                    <button onClick={loadFromApi} className="underline hover:text-amber-200 transition-colors">
+                      retry
+                    </button>.
+                  </span>
+                </>
+              )}
+            </div>
+            <button onClick={dismissApiError} className="shrink-0 text-amber-500 hover:text-amber-300 transition-colors">
+              <X size={13} />
+            </button>
           </div>
-          <button onClick={dismissApiError} className="shrink-0 text-amber-500 hover:text-amber-300 transition-colors">
-            <X size={13} />
-          </button>
-        </div>
-      )}
+        )
+      })()}
     </div>
   )
 }
